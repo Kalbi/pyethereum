@@ -28,33 +28,24 @@ def db():
     return EphemDB()
 alt_db = db
 
-def init_chain_and_casper():
-    genesis = casper_utils.make_casper_genesis(k0, ALLOC, EPOCH_LENGTH, SLASH_DELAY)
-    t = tester.Chain(genesis=genesis)
-    casper = tester.ABIContract(t, casper_utils.casper_abi, t.chain.env.config['CASPER_ADDRESS'])
-    casper.initiate()
-    return t, casper
-
 def init_multi_validator_casper(num_validators):
     """"
     Initialize Casper genesis, login an initial validator, and create num_validators validators
     """
     # Begin tests
-    genesis = casper_utils.make_casper_genesis(k0, ALLOC, EPOCH_LENGTH, SLASH_DELAY)
+    genesis = casper_utils.make_casper_genesis(ALLOC, EPOCH_LENGTH, 25, 0.02, 0.002)
+    t = tester.Chain(genesis=genesis)
+    casper = tester.ABIContract(t, casper_utils.casper_abi, t.chain.config['CASPER_ADDRESS'])
     # Get the val code addresses and network
-    init_val_addr = utils.privtoaddr(k0)
-    init_val_valcode_addr = utils.mk_contract_address(init_val_addr, 2)
     network = validator.Network()
     # Initialize validators, starting with the first validator
-    validators = [validator.Validator(k0, copy.deepcopy(genesis), network, valcode_addr=init_val_valcode_addr)]
-    # Add four more validators
-    for i in range(1, num_validators):
+    validators = []
+    # Add our validators
+    for i in range(0, num_validators):
         log.info('Adding validator {}'.format(i))
         validators.append(validator.Validator(tester.keys[i], copy.deepcopy(genesis), network))
     t = tester.Chain(genesis=genesis)
     casper = tester.ABIContract(t, casper_utils.casper_abi, t.chain.env.config['CASPER_ADDRESS'])
-    casper.initiate()
-    validators[0].nonce += 1
     t.mine(26)
     # Pump the blocks into the validators
     for i in range(1, 27):
@@ -65,7 +56,7 @@ def init_multi_validator_casper(num_validators):
     if num_validators < 1:
         return t, casper
     # Submit deposits for new validators
-    for i in range(1, num_validators):
+    for i in range(0, num_validators):
         validators[i].broadcast_deposit()
         validators[0].mine_and_broadcast_blocks(1)
     return t, casper, validators
@@ -102,22 +93,21 @@ def test_validate_sequential_epochs(db):
     t, casper, validators = init_multi_validator_casper(3)
     validators[0].mining = True
     # Mine enough epochs to log everyone in
-    mine_epochs(validators[0], 2)
+    mine_epochs(validators[0], 3)
     # Check all validators are logged in
     casper = mk_casper_tester(validators[0])
-    assert casper.get_dynasty() == 2
-    assert 3 * 10**18 <= casper.get_total_deposits(0) < 4 * 10**18
-    assert 3 * 10**18 <= casper.get_total_deposits(1) < 4 * 10**18
-    assert 9 * 10**18 <= casper.get_total_deposits(2) < 10 * 10**18
+    assert casper.get_dynasty() == 4
+    assert 9 * 10**18 <= casper.get_total_curdyn_deposits() < 10 * 10**18
     # Mine two epochs, checking that everyone prepares and commits
-    for i in range(3, 5):
+    for i in range(4, 6):
         mine_epochs(validators[0], 1)
         # Make sure each validator's prev_commit_epoch is correct
         for v in validators:
             assert v.prev_commit_epoch == i
         # Make sure the hash for the epoch is justified
         casper = mk_casper_tester(validators[0])
-        assert casper.get_consensus_messages__hash_justified(i, validators[0].epoch_blockhash(validators[0].chain.state, i))
+        cp_hash = validators[0].chain.get_block_by_number(i*EPOCH_LENGTH).hash
+        assert validators[0].chain.get_checkpoint_score(cp_hash) >= 0.6
     # Log the first validator's chain
     log_chain(validators[0])
 
@@ -147,16 +137,16 @@ def test_validate_epochs_skipping_one(db):
     for v in validators:
         assert v.prev_commit_epoch == 5
     # Make sure the hash for the epoch is justified and the epoch is committed
-    casper = mk_casper_tester(validators[0])
-    assert casper.get_consensus_messages__hash_justified(5, validators[0].epoch_blockhash(validators[0].chain.state, 5))
-    assert casper.get_consensus_messages__committed(5)
+    cp_hash = validators[0].chain.get_block_by_number(5*EPOCH_LENGTH).hash
+    assert validators[0].chain.get_checkpoint_score(cp_hash) >= 0.6
     # Make sure epoch 4 was not committed
-    assert not casper.get_consensus_messages__committed(4)
+    cp_4_hash = validators[0].chain.get_block_by_number(4*EPOCH_LENGTH).hash
+    assert validators[0].chain.get_checkpoint_score(cp_4_hash) == 0
     # TODO: Check that the ancestry hash is correct
     # Log the first validator's chain
     log_chain(validators[0])
 
-def test_login_and_logout(db):
+def test_withdrawl(db):
     """"
     Create 3 validators, log one out, and check that the logout was successful
     """
@@ -165,19 +155,19 @@ def test_login_and_logout(db):
     validators[0].mining = True
     # Mine enough epochs to log everyone in, and then mine one more where everyone is able to prepare & commit
     mine_epochs(validators[0], 3)
-    # Submit a flick status tx which should logout our 3rd validator
-    validators[2].broadcast_flick_status(0)
+    # Submit a logout tx which should logout our 3rd validator
+    validators[2].broadcast_logout(0)
     # Mine the logout tx and finish the epoch
     mine_epochs(validators[0], 1)
     casper = mk_casper_tester(validators[0])
     log.info('Dynasty: {}'.format(casper.get_dynasty()))
     # Check that all three validators are logged in
-    assert 9 * 10**18 <= casper.get_total_deposits(3) < 10 * 10**18
+    assert 9 * 10**18 <= casper.get_total_curdyn_deposits() < 10 * 10**18
     # Mine & finalize enough epochs to logout the validator
     mine_epochs(validators[0], 2)
     casper = mk_casper_tester(validators[0])
     # Check that only two validators are logged in
-    assert 6 * 10**18 <= casper.get_total_deposits(5) < 7 * 10**18
+    assert 6 * 10**18 <= casper.get_total_curdyn_deposits() < 7 * 10**18
     # TODO: For bonus points, verify this works when an epoch is not finalized!
     # Log the first validator's chain
     log_chain(validators[0])
