@@ -26,3 +26,7 @@ pyethereum/monkeypatch.py
 .eggs
 .cache
 .env
+venv/*
+Vagrantfile
+vagrant.sh
+.vagrant/*
